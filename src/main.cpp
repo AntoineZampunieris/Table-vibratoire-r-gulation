@@ -1,5 +1,5 @@
 #include <Arduino.h>
-#include <PID_v1.h>
+#include <QuickPID.h>
 
 static const uint8_t NUM_MOTORS = 6;
 
@@ -14,7 +14,7 @@ int8_t REF_IDX = -1;   // resolved at setup()
 // ---------------- Mechanical zero voltages (your measured values) ----------------
 volatile float ZERO_V[NUM_MOTORS] = {
   2.29f, 2.21f, 1.59f, 1.66f, 0.82f, 2.94f
-};
+} ;
 
 const float VSPAN = 3.3f;   // sensor full-scale
 
@@ -31,8 +31,8 @@ const uint8_t PWM_MAX[NUM_MOTORS] = {
   255, 255, 255, 255, 255, 255
 };
 
-const uint16_t EDGE_LOCKOUT_US = 200;   // ignore edges that are too close
-const uint32_t CTRL_DT_US      = 500;   // outer control loop period
+const uint16_t EDGE_LOCKOUT_US = 100;   // ignore edges that are too close
+const uint32_t CTRL_DT_US      = 200;   // outer control loop period
 
 // ---------------- Desired mechanical phase vs MASTER (in cycles) ----------------
 // positive = MASTER leads this motor by this fraction of a cycle
@@ -104,22 +104,27 @@ static inline float wrapCycles(float cyc) {
 }
 
 // ---------------- PID plumbing: one PID per SLAVE motor ----------------
-double PID_Input[NUM_MOTORS]    = {0};
-double PID_Output[NUM_MOTORS]   = {0};
-double PID_Setpoint[NUM_MOTORS] = {0};
+float PID_Input[NUM_MOTORS]    = {0.0f};
+float PID_Output[NUM_MOTORS]   = {0.0f};
+float PID_Setpoint[NUM_MOTORS] = {0.0f};
 
 // Gains (start from the values that worked for your single pair)
 double Kp = 80.0;
 double Ki = 40.0;
 double Kd = 0.0;
 
-PID* pids[NUM_MOTORS] = {nullptr};
+QuickPID* pids[NUM_MOTORS] = { nullptr };
+
 
 // Slew-limited last commands per motor
 int16_t lastCmd[NUM_MOTORS];
 
 // Current selected mode (0 or 1)
 uint8_t currentMode = 0;
+
+// ------------- Serial command buffer -------------
+static char cmdBuf[32];
+static uint8_t cmdIdx = 0;
 
 // ---------------- Runtime helpers ----------------
 inline void setPhaseOffsetForMotor(uint8_t idx, float cyc) {
@@ -147,6 +152,22 @@ inline void setZeroVoltageForMotor(uint8_t idx, float v) {
   interrupts();
 }
 
+// Update tunings on all PIDs (slaves)
+void updateAllTunings() {
+  for (uint8_t i = 0; i < NUM_MOTORS; i++) {
+    if (i == REF_IDX) continue;
+    if (pids[i]) {
+      pids[i]->SetTunings(Kp, Ki, Kd);
+    }
+  }
+  Serial.print(F("New gains: Kp="));
+  Serial.print(Kp, 4);
+  Serial.print(F(", Ki="));
+  Serial.print(Ki, 4);
+  Serial.print(F(", Kd="));
+  Serial.println(Kd, 4);
+}
+
 // Apply operating mode:
 // mode 0: all phase offsets = 0
 // mode 1: all = 0, except PWM 8 and PWM 6 at 0.33 cycles
@@ -161,8 +182,8 @@ void applyMode(uint8_t mode) {
 
   if (mode == 1) {
     // set PWM 8 and 6 to 0.33 cycles
-    setPhaseOffsetForPwm(8, 0.25f);
-    setPhaseOffsetForPwm(6, 0.25f);
+    setPhaseOffsetForPwm(8, 0.33f);
+    setPhaseOffsetForPwm(6, 0.33f);
   }
 
   currentMode = mode;
@@ -176,6 +197,74 @@ void applyMode(uint8_t mode) {
   }
 }
 
+// Simple lowercase helper
+char toLowerChar(char c) {
+  if (c >= 'A' && c <= 'Z') return c - 'A' + 'a';
+  return c;
+}
+
+// Process a full line from Serial
+void processCommand(const char* line) {
+  // Make a small, mutable copy
+  char buf[32];
+  strncpy(buf, line, sizeof(buf));
+  buf[sizeof(buf) - 1] = '\0';
+
+  // Trim leading spaces
+  char* p = buf;
+  while (*p == ' ' || *p == '\t') p++;
+
+  // Lowercase first word for easier parsing
+  for (char* q = p; *q != '\0' && *q != ' ' && *q != '\t'; ++q) {
+    *q = toLowerChar(*q);
+  }
+
+  // Mode change: "0", "1", "mode 0", "mode 1"
+  if ((p[0] == '0' && p[1] == '\0') || strncmp(p, "mode 0", 6) == 0) {
+    applyMode(0);
+    return;
+  }
+  if ((p[0] == '1' && p[1] == '\0') || strncmp(p, "mode 1", 6) == 0) {
+    applyMode(1);
+    return;
+  }
+
+  // Gains: "kp 10.5", "ki 20", "kd 0.0"
+  if (strncmp(p, "kp", 2) == 0) {
+    char* valStr = p + 2;
+    while (*valStr == ' ' || *valStr == '\t' || *valStr == '=') valStr++;
+    if (*valStr != '\0') {
+      Kp = atof(valStr);
+      updateAllTunings();
+    }
+    return;
+  }
+
+  if (strncmp(p, "ki", 2) == 0) {
+    char* valStr = p + 2;
+    while (*valStr == ' ' || *valStr == '\t' || *valStr == '=') valStr++;
+    if (*valStr != '\0') {
+      Ki = atof(valStr);
+      updateAllTunings();
+    }
+    return;
+  }
+
+  if (strncmp(p, "kd", 2) == 0) {
+    char* valStr = p + 2;
+    while (*valStr == ' ' || *valStr == '\t' || *valStr == '=') valStr++;
+    if (*valStr != '\0') {
+      Kd = atof(valStr);
+      updateAllTunings();
+    }
+    return;
+  }
+
+  Serial.print(F("Unknown command: "));
+  Serial.println(line);
+  Serial.println(F("Valid: 0, 1, mode 0, mode 1, kp <val>, ki <val>, kd <val>"));
+}
+
 // ---------------- Setup ----------------
 void setup() {
   Serial.begin(115200);
@@ -184,9 +273,12 @@ void setup() {
   Serial.println(F("\n=== Multi-motor phase control ==="));
   Serial.println(F("Master: PWM 5"));
   Serial.println(F("Modes:"));
-  Serial.println(F("  0 -> all phase offsets = 0"));
-  Serial.println(F("  1 -> all 0 except PWM 8 & 6 at 0.33 cycles"));
-  Serial.println(F("Type 0 or 1 in the Serial Monitor and press Enter.\n"));
+  Serial.println(F("  0 or 'mode 0' -> all phase offsets = 0"));
+  Serial.println(F("  1 or 'mode 1' -> all 0 except PWM 8 & 6 = 0.33 cycles\n"));
+  Serial.println(F("Gains:"));
+  Serial.println(F("  kp <value>   (e.g. 'kp 10.0')"));
+  Serial.println(F("  ki <value>   (e.g. 'ki 20')"));
+  Serial.println(F("  kd <value>   (e.g. 'kd 0.0')\n"));
 
   analogWriteResolution(8); // 0..255 on Arduino Zero
 
@@ -230,28 +322,37 @@ void setup() {
     }
     PID_Output[i]   = PWM_BASE[i];
     PID_Setpoint[i] = 0.0;
-    pids[i] = new PID(&PID_Input[i], &PID_Output[i], &PID_Setpoint[i],
-                      Kp, Ki, Kd, DIRECT);
+    // Construct QuickPID.
+    // Action::direct = same idea as DIRECT (positive error -> increase output).
+    pids[i] = new QuickPID(&PID_Input[i], &PID_Output[i], &PID_Setpoint[i],Kp, Ki, Kd, QuickPID::Action::direct);
+
     pids[i]->SetOutputLimits(PWM_MIN[i], PWM_MAX[i]);
-    pids[i]->SetSampleTime(1);        // 1 ms internal PID update
-    pids[i]->SetMode(AUTOMATIC);
+    // Enable automatic mode
+    pids[i]->SetMode(QuickPID::Control::automatic);
   }
 
   // Default mode at startup: 0 (all in phase)
   applyMode(0);
+  updateAllTunings();
 }
 
 // ---------------- Main control loop ----------------
 void loop() {
-  // --- Handle Serial input for mode selection ---
-  if (Serial.available() > 0) {
+  // --- Handle Serial input (line-based) ---
+  while (Serial.available() > 0) {
     char c = Serial.read();
-    if (c == '0') {
-      applyMode(0);
-    } else if (c == '1') {
-      applyMode(1);
+    if (c == '\r') continue; // ignore CR
+    if (c == '\n') {
+      if (cmdIdx > 0) {
+        cmdBuf[cmdIdx] = '\0';
+        processCommand(cmdBuf);
+        cmdIdx = 0;
+      }
+    } else {
+      if (cmdIdx < sizeof(cmdBuf) - 1) {
+        cmdBuf[cmdIdx++] = c;
+      }
     }
-    // ignore other characters
   }
 
   // --- Phase control loop ---
