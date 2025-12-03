@@ -1,17 +1,19 @@
 #include <Arduino.h>
 #include <QuickPID.h>
 
-static const uint8_t NUM_MOTORS = 4;
+static const uint8_t NUM_MOTORS = 2;
 
 // // ---------------- Pin maps (your values) ----------------
 // static const uint8_t PWM_PINS[NUM_MOTORS]  = {12, 10, 8, 6, 5, 4}; // idx 0..5
 // static const uint8_t EDGE_PINS[NUM_MOTORS] = {13, 11, 9, 7, 2, 3}; // idx 0..5
 // ---------------- Pin maps (your values) ----------------
-static const uint8_t PWM_PINS[NUM_MOTORS]  = {12, 10, 5, 4}; // idx 0..5
-static const uint8_t EDGE_PINS[NUM_MOTORS] = {13, 11, 2, 3}; // idx 0..5
+// static const uint8_t PWM_PINS[NUM_MOTORS]  = {5, 4}; // idx 0..5
+// static const uint8_t EDGE_PINS[NUM_MOTORS] = {2, 3}; // idx 0..5
+static const uint8_t PWM_PINS[NUM_MOTORS]  = {12, 10}; // idx 0..5
+static const uint8_t EDGE_PINS[NUM_MOTORS] = {13, 11}; // idx 0..5
 
 // We choose the motor on PWM pin 5 as the global master
-static const uint8_t REF_PWM_PIN = 5;
+static const uint8_t REF_PWM_PIN = 10;
 int8_t REF_IDX = -1;   // resolved at setup()
 
 // ---------------- Mechanical zero voltages (your measured values) ----------------
@@ -33,26 +35,23 @@ int8_t REF_IDX = -1;   // resolved at setup()
 // const uint8_t PWM_MAX[NUM_MOTORS] = {
 //   255, 255, 255, 255, 255, 255
 // };
-// volatile float ZERO_V[NUM_MOTORS] = {
-//   3.16f, 2.17f, 1.35f, 1.93f
-// } ;
 volatile float ZERO_V[NUM_MOTORS] = {
-  0.50f, 2.00f, 1.22f, 1.66f
+  3.16f, 2.17f
 } ;
 
 const float VSPAN = 3.3f;   // sensor full-scale
 
 // ---------------- Fixed settings ----------------
 const uint8_t PWM_BASE[NUM_MOTORS] = {
-  200, 200, 200, 200
+  220, 220
 };
 
 const uint8_t PWM_MIN[NUM_MOTORS] = {
-  20, 20, 20, 20
+  20, 20
 };
 
 const uint8_t PWM_MAX[NUM_MOTORS] = {
-  255, 255, 255, 255
+  255, 255
 };
 
 const uint16_t EDGE_LOCKOUT_US = 100;   // ignore edges that are too close
@@ -65,7 +64,7 @@ const uint32_t CTRL_DT_US      = 0;   // outer control loop period
 //   0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f
 // };
 volatile float phaseOffset_cycles[NUM_MOTORS] = {
-  0.00f, 0.25f, 0.00f, 0.25f
+  0.00f, 0.25f
 };
 
 // ---------------- ISR state ----------------
@@ -116,7 +115,7 @@ void isr5() {
 // };
 typedef void (*isr_fn_t)();
 static const isr_fn_t ISR_FUNS[NUM_MOTORS] = {
-  isr0, isr1, isr2, isr3
+  isr0, isr1
 };
 
 // ---------------- Helpers: wrapping ----------------
@@ -140,8 +139,8 @@ float PID_Output[NUM_MOTORS]   = {0.0f};
 float PID_Setpoint[NUM_MOTORS] = {0.0f};
 
 // Gains (start from the values that worked for your single pair)
-double Kp = 10.0;
-double Ki = 1.0;
+double Kp = 80.0;
+double Ki = 80.0;
 double Kd = 0.0;
 
 QuickPID* pids[NUM_MOTORS] = { nullptr };
